@@ -221,6 +221,7 @@ class DataLoader(object):
                      drop_dup:bool=False,
                      drop_dup_cols:List[str]=["hhid"],
                      merge_on:Union[str,List[str]] = "hhid",
+                     save:bool=False,
                      save_file_name:str=None,
                      save_dir:str = "./"
                      ):
@@ -246,7 +247,7 @@ class DataLoader(object):
         dataset = pd.concat(dataset,axis=1)
         self.get_common(idx_set_dict, prefix="idx_")
         self.get_common(col_set_dict,prefix="col_")
-        if save_file_name:
+        if save:
             save_path = os.path.join(save_dir,".".join([save_file_name,self.save_format]))
             getattr(dataset,f"to_{self.save_format}")(save_path,index=False)
         return dataset
