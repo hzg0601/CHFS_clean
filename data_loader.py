@@ -280,8 +280,8 @@ class DataLoader(object):
     def get_common(self, set_dict:dict, save=True, save_path="./",prefix=""):
         longest = max([len(value) for key, value in set_dict.items()])
         common_set = [set(value) for key,value in set_dict.items()]
-        common_set = reduce(lambda x,y: x & y, list(common_set))
-        common_set = pd.Series(common_set)
+        common_set = reduce(lambda x,y: x.intersection(y), common_set)
+        common_set = pd.Series(list(common_set))
         pad_dict = {key: (value + [0]*(longest - len(value))) for key,value in set_dict.items()}
         pad_dict = pd.DataFrame(pad_dict)
         if save:
@@ -301,7 +301,7 @@ if __name__ == "__main__":
     # data = loader.year_entity_loader(year=2011,entity="hh")
     # data = loader.year_batch_loader(year=2011,entities="all")
     # data = loader.entity_batch_loader(years="all",entity="hh")
-    data = loader.batch_loader(years=[2013,2015,2017,2019],
+    data = loader.batch_loader(years=[2013,2015,2017,2019], # 
                                entities=["hh","master"],
                                drop_dup=True,
                                merge_on="hhid",
