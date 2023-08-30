@@ -10,7 +10,8 @@ from typing import Union, List, Tuple, Dict
 from pathlib import Path
 import re
 from functools import reduce
-
+import warnings
+warnings.warn("ignore")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)  # set logger level
 
@@ -22,7 +23,12 @@ logger.addHandler(ch)
 
 
 class DataLoader(object):
-    """一个读取chfs数据的类"""
+    """一个读取chfs数据的类，
+    read_format:读取文件的格式
+    save_format:存储文件的格式
+    used_cols:选取的变量名列表
+    
+    """
     def __init__(self,
                  read_format="txt",
                  save_format="csv",
@@ -33,7 +39,7 @@ class DataLoader(object):
         self.reader_dict = {"txt": self.txt_reader,
                             "stata13":self.dta_2013_reader,
                             "stata14":self.dta_2014_reader}
-        self.used_cols = set(used_cols)
+        self.used_cols = set(used_cols) if used_cols is not None else None
 
 
     def txt_reader(self,
@@ -126,7 +132,9 @@ class DataLoader(object):
     def year_entity_loader(self,
                     year:Union[int, str]=2011,
                     entity:str="hh", # hh, id, master
-                    data_dir:str="./"
+                    data_dir:str="./",
+                    drop_dup:bool=False,
+                    drop_dup_cols:List[str] = ["hhid"]
                     ) -> pd.DataFrame:
         """读取某一年某一entity的数据
 
@@ -143,14 +151,19 @@ class DataLoader(object):
             data = data.drop(columns=["index"])
         # 设置hhid列
         data = self.set_id(data=data,idx_col="hhid")
-        # 取出指定的变量
+        # 取出指定的列
         data = self.select_cols(data)
+        # 去重
+        if drop_dup:
+            data = data.drop_duplicates(subset=drop_dup_cols)
         return data
 
     def entity_batch_loader(self,
                             entity:str="hh",
                             years: Union[str, List[int]]="all",
-                            data_dir: str = "./"
+                            data_dir: str = "./",
+                            drop_dup:bool = False,
+                            drop_dup_cols:List[str] = ["hhid"]
                             )-> pd.DataFrame:
         """读取指定某一个entity[hh,ind,master]指定多个年份的数据"""
         if years == "all":
@@ -161,7 +174,11 @@ class DataLoader(object):
                 raise KeyError
         dataset = []
         for year in years:
-            data = self.year_entity_loader(year=year,entity=entity,data_dir=data_dir)
+            data = self.year_entity_loader(year=year,
+                                           entity=entity,
+                                           data_dir=data_dir,
+                                           drop_dup=drop_dup,
+                                           drop_dup_cols=drop_dup_cols)
             dataset.append(data)
         dataset = pd.concat(dataset,axis=1)
 
@@ -170,18 +187,26 @@ class DataLoader(object):
     def year_batch_loader(self,
                           entities:Union[str,List[str]]="all",
                           year:int=2019,
-                          data_dir:str="./"):
+                          data_dir:str="./",
+                          drop_dup:bool=False,
+                          drop_dup_cols:List[str]=["hhid"],
+                          merge_on:Union[str,List[str]] = "hhid"
+                          ):
         """读取指定某一个年份下多个entity["hh","ind","master"]的数据并合并"""
         if entities == "all":
             entities = ["hh","ind","master"]
         dataset = []
         for entity in entities:
-            data = self.year_entity_loader(year=year,entity=entity,data_dir=data_dir)
+            data = self.year_entity_loader(year=year,
+                                           entity=entity,
+                                           data_dir=data_dir,
+                                           drop_dup=drop_dup,
+                                           drop_dup_cols=drop_dup_cols)
 
             dataset.append(data)
             print(f"entity:{entity} shape:{data.shape}")
         try:
-            dataset = reduce(lambda left,right: pd.merge(left=left,right=right,on="hhid",how="outer"),dataset)
+            dataset = reduce(lambda left,right: pd.merge(left=left,right=right,on=merge_on,how="outer"),dataset)
         except:
             print("error occurred!")
 
@@ -192,7 +217,13 @@ class DataLoader(object):
     def batch_loader(self,
                      entities:Union[str,List[str]]="all",
                      years:Union[str,List[int]]="all",
-                     data_dir="./"):
+                     data_dir="./",
+                     drop_dup:bool=False,
+                     drop_dup_cols:List[str]=["hhid"],
+                     merge_on:Union[str,List[str]] = "hhid",
+                     save_file_name:str=None,
+                     save_dir:str = "./"
+                     ):
         """批量读取指定多个年份、多个entity[hh,ind,master]的数据"""
         if entities == "all":
             entities = ["hh","ind","master"]
@@ -203,14 +234,21 @@ class DataLoader(object):
         idx_set_dict = {}
         col_set_dict = {}
         for year in years:
-            data = self.year_batch_loader(entities=entities,year=year,data_dir=data_dir)
+            data = self.year_batch_loader(entities=entities,
+                                          year=year,
+                                          data_dir=data_dir,
+                                          drop_dup=drop_dup,
+                                          drop_dup_cols=drop_dup_cols,
+                                          merge_on=merge_on)
             idx_set_dict[year] = data['hhid'].to_list()
             col_set_dict[year] = data.columns.to_list()
             dataset.append(data)
         dataset = pd.concat(dataset,axis=1)
         self.get_common(idx_set_dict, prefix="idx_")
         self.get_common(col_set_dict,prefix="col_")
-
+        if save_file_name:
+            save_path = os.path.join(save_dir,".".join([save_file_name,self.save_format]))
+            getattr(dataset,f"to_{self.save_format}")(save_path,index=False)
         return dataset
 
 
@@ -238,12 +276,10 @@ class DataLoader(object):
         else:
             return data
 
-        
-
     def get_common(self, set_dict:dict, save=True, save_path="./",prefix=""):
         longest = max([len(value) for key, value in set_dict.items()])
         common_set = [set(value) for key,value in set_dict.items()]
-        common_set = reduce(lambda x,y: x & y, common_set)
+        common_set = reduce(lambda x,y: x & y, list(common_set))
         common_set = pd.Series(common_set)
         pad_dict = {key: (value + [0]*(longest - len(value))) for key,value in set_dict.items()}
         pad_dict = pd.DataFrame(pad_dict)
@@ -255,14 +291,20 @@ class DataLoader(object):
 
 
 
-
 if __name__ == "__main__":
-    loader = DataLoader(read_format="txt",save_format="csv")
+    used_cols = None # 指定需要的变量名
+    loader = DataLoader(read_format="txt",
+                        save_format="csv",
+                        used_cols=used_cols)
 
     # data = loader.year_entity_loader(year=2011,entity="hh")
     # data = loader.year_batch_loader(year=2011,entities="all")
     # data = loader.entity_batch_loader(years="all",entity="hh")
-    data = loader.batch_loader(years="all",entities="all")
+    data = loader.batch_loader(years=[2013,2015,2017,2019],
+                               entities=["hh","master"],
+                               drop_dup=True,
+                               merge_on="hhid",
+                               drop_dup_cols=["hhid"])
     data.to_csv("./all_data.csv",index=None,encoding="utf-8")
     
 
