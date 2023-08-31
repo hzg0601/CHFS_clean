@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 from functools import reduce
 import warnings
-warnings.warn("ignore")
+warnings.filterwarnings("ignore")
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)  # set logger level
 
@@ -31,11 +31,9 @@ class DataLoader(object):
     """
     def __init__(self,
                  read_format="txt",
-                 save_format="csv",
                  used_cols:List[str] = None,
                  ) -> None:
         self.read_format = read_format
-        self.save_format = save_format
         self.reader_dict = {"txt": self.txt_reader,
                             "stata13":self.dta_2013_reader,
                             "stata14":self.dta_2014_reader}
@@ -81,10 +79,8 @@ class DataLoader(object):
                 save_name = file_path[0].split(".")[0].replace("/","_").replace("\\","_")
             save_name = ".".join(save_name,save_format)
             file_path = os.path.join(save_dir, save_name)
-            if save_format == "csv":
-                data.to_csv(file_path,index=False)
-            elif save_format == "xlsx":
-                data.to_excel(file_path,index=False)
+            data.to_csv(file_path,index=False)
+
         return data
 
 
@@ -137,25 +133,26 @@ class DataLoader(object):
                     drop_dup_cols:List[str] = ["hhid"]
                     ) -> pd.DataFrame:
         """读取某一年某一entity的数据
-
         """
         second_path = self.match_path(data_dir,str(year))
         third_path = self.match_path(second_path,self.read_format)
-        # file_path = self.match_path(third_path,entity)
+
         reader = self.reader_dict[self.read_format]
         data = reader(file_name=entity,data_dir=third_path,save=False)
+        # 增加year变量
         data['year'] = int(year)
-        print(f"year {year}, shape:{data.shape}")
+        print(f"before--year {year},entity:{entity}, shape:{data.shape}")
         # 删除index列
         if "index" in data.columns:
             data = data.drop(columns=["index"])
         # 设置hhid列
         data = self.set_id(data=data,idx_col="hhid")
         # 取出指定的列
-        data = self.select_cols(data)
+        data = self.select_cols(data,used_cols=None)
         # 去重
         if drop_dup:
             data = data.drop_duplicates(subset=drop_dup_cols)
+        print(f"after--year {year},entity:{entity}, shape:{data.shape}")
         return data
 
     def entity_batch_loader(self,
@@ -181,7 +178,7 @@ class DataLoader(object):
                                            drop_dup_cols=drop_dup_cols)
             dataset.append(data)
         dataset = pd.concat(dataset,axis=1)
-
+        print(f"shape in `entity_batch_loader`:{dataset.shape}")
         return dataset
 
     def year_batch_loader(self,
@@ -190,7 +187,10 @@ class DataLoader(object):
                           data_dir:str="./",
                           drop_dup:bool=False,
                           drop_dup_cols:List[str]=["hhid"],
-                          merge_on:Union[str,List[str]] = "hhid"
+                          merge_on:Union[str,List[str]] = ["hhid","year"],
+                          save:bool=True,
+                          save_file_name:str=None,
+                          save_dir:str="./"
                           ):
         """读取指定某一个年份下多个entity["hh","ind","master"]的数据并合并"""
         if entities == "all":
@@ -204,14 +204,12 @@ class DataLoader(object):
                                            drop_dup_cols=drop_dup_cols)
 
             dataset.append(data)
-            print(f"entity:{entity} shape:{data.shape}")
-        try:
-            dataset = reduce(lambda left,right: pd.merge(left=left,right=right,on=merge_on,how="outer"),dataset)
-        except:
-            print("error occurred!")
-
-
-        dataset['year'] = int(year)
+        dataset = reduce(lambda left,right: pd.merge(left=left,right=right,on=merge_on,how="outer"),dataset)
+        if save:
+            save_file_name = str(year)+"_".join(entities)+"_"+str(drop_dup) + "." + "csv"
+            save_path = os.path.join(save_dir,save_file_name)
+            dataset.to_csv(save_path,index=False,encoding='utf_8_boom')
+        print(f"shape in `year_batch_loader`:{dataset.shape}")
         return dataset
 
     def batch_loader(self,
@@ -220,10 +218,12 @@ class DataLoader(object):
                      data_dir="./",
                      drop_dup:bool=False,
                      drop_dup_cols:List[str]=["hhid"],
-                     merge_on:Union[str,List[str]] = "hhid",
+                     merge_on:Union[str,List[str]] = ["hhid","year"],
                      save:bool=False,
                      save_file_name:str=None,
-                     save_dir:str = "./"
+                     save_dir:str = "./",
+                     keep_common_cols:bool=False,
+                     keep_common_idx:bool=False,
                      ):
         """批量读取指定多个年份、多个entity[hh,ind,master]的数据"""
         if entities == "all":
@@ -245,57 +245,69 @@ class DataLoader(object):
             col_set_dict[year] = data.columns.to_list()
             dataset.append(data)
         dataset = pd.concat(dataset,axis=1)
-        self.get_common(idx_set_dict, prefix="idx_")
-        self.get_common(col_set_dict,prefix="col_")
+        common_idx,_ = self.get_common(idx_set_dict, prefix="hhid") #! 必须是列名
+        common_cols,_ = self.get_common(col_set_dict,prefix="cols") 
+        if keep_common_cols:
+            dataset = self.select_cols(dataset,used_cols=common_cols)
+        if keep_common_idx:
+            dataset = self.select_idx(dataset,idx_col="hhid",used_idx=common_idx)
         if save:
-            save_path = os.path.join(save_dir,".".join([save_file_name,self.save_format]))
-            getattr(dataset,f"to_{self.save_format}")(save_path,index=False)
+            if not isinstance(save_file_name,str):
+                print("未设置存储到本地的文件名,临时设置为`all_data`")
+                save_file_name = "all_data" 
+            save_path = os.path.join(save_dir,".".join([save_file_name,"csv"]))
+            dataset.to_csv(save_path,index=False)
+        print(f"shape in `batch_loader`:{dataset.shape}")
         return dataset
-
 
     def set_id(self,data:pd.DataFrame, idx_col:str="hhid"):
         """部分数据没有hhid,而存在hhid_2011,hhid_2013等列，需要从中选出hhid"""
+        idx_cols = [col for col in data.columns if re.search(f"{idx_col}_[0-9]{{4}}", col)]
         if idx_col not in data.columns:
-            idx_cols = [col for col in data.columns if re.search(f"{idx_col}_[0-9]{{4}}", col)]
             idx_data = data[idx_cols]
             idx_data.rename(columns={raw :int(re.search("[0-9]{4}",raw).group(0)) for raw in idx_cols},inplace=True)
-            idx_temp = idx_data.apply(lambda x: x.dropna(), axis=0)
             idx_list = []
             for idx, row in idx_data.iterrows():
                 temp = row[row.dropna().idxmin()]
                 idx_list.append(temp)
             data[idx_col] = idx_list
         data[idx_col] = data[idx_col].astype(int)
+        data = data.drop(columns=idx_cols)
         return data
-
-    def select_cols(self,data):
+    
+    def select_cols(self,data,used_cols=None) -> pd.DataFrame:
         """根据self.used_cols选择特定的列"""
-        if self.used_cols is not None:
+        if used_cols is not None:
             data_cols = set(data.columns.to_list())
-            used_cols = list(data_cols & self.used_cols)
+            used_cols = list(data_cols & set(used_cols))
             return data[used_cols]
         else:
             return data
+        
+    def select_idx(self,data,idx_col="hhid",used_idx=None) -> pd.DataFrame:
+        """根据self.used_idx选择特定行"""
+        if used_idx is not None:
+            used_idx = list(set(used_idx))
+            data = data[data[idx_col].isin(used_idx)]
+        return data
 
-    def get_common(self, set_dict:dict, save=True, save_path="./",prefix=""):
+    def get_common(self, set_dict:dict, save=True, save_path="./",prefix="")->pd.DataFrame:
         longest = max([len(value) for key, value in set_dict.items()])
         common_set = [set(value) for key,value in set_dict.items()]
         common_set = reduce(lambda x,y: x.intersection(y), common_set)
-        common_set = pd.Series(list(common_set))
+        common_set = pd.Series(list(common_set),name=prefix)
         pad_dict = {key: (value + [0]*(longest - len(value))) for key,value in set_dict.items()}
         pad_dict = pd.DataFrame(pad_dict)
         if save:
-            common_set.to_csv(os.path.join(save_path,prefix+"common_set.csv"),index=False)
-            pad_dict.to_csv(os.path.join(save_path,prefix+"pad_dict.csv"),index=False)
-        else:
-            return common_set, pad_dict
+            common_set.to_csv(os.path.join(save_path,prefix+"_common_set.csv"),index=False)
+            pad_dict.to_csv(os.path.join(save_path,prefix+"_pad_dict.csv"),index=False)
 
+        return common_set, pad_dict
 
 
 if __name__ == "__main__":
     used_cols = None # 指定需要的变量名
     loader = DataLoader(read_format="txt",
-                        save_format="csv",
                         used_cols=used_cols)
 
     # data = loader.year_entity_loader(year=2011,entity="hh")
@@ -304,9 +316,12 @@ if __name__ == "__main__":
     data = loader.batch_loader(years=[2013,2015,2017,2019], # 
                                entities=["hh","master"],
                                drop_dup=True,
-                               merge_on="hhid",
-                               drop_dup_cols=["hhid"])
-    data.to_csv("./all_data.csv",index=None,encoding="utf-8")
+                               merge_on=["hhid","year"],
+                               drop_dup_cols=["hhid"],
+                               keep_common_idx=True
+                               )
+    
+    # data.to_csv("./all_data.csv",index=None,encoding="utf-8")
     
 
 
