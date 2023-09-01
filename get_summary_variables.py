@@ -9,7 +9,7 @@ version:
 Author: huangzg
 LastEditors: huangzg
 Date: 2023-08-31 16:04:26
-LastEditTime: 2023-09-01 18:20:13
+LastEditTime: 2023-09-02 01:46:06
 '''
 import pandas as pd
 import numpy as np
@@ -43,16 +43,20 @@ class SummaryVariables(object):
     def uni_exception_parser(self, 
                        rule_str:str
                        ):
-        """用于处理非常规公式,如`...`,`分为三种情况`等
+        """用于处理非常规公式,如`...`等
 
         """
-        if "..." in rule_str:
-            last_num_str = re.rule_str.split("...")[-1].split("+")[1] # 例如, c2064_6_imp
+        if "…" in rule_str:
+            last_num_str = rule_str.split("…")[-1].split("+")[1] # 例如, c2064_6_imp
             num = int(last_num_str.split("_")[1])
             inter_nums = list(range(2,num))
             inter_num_str_list = [last_num_str.replace(str(num),str(i)) for i in inter_nums]
             inter_str = "+".join(inter_num_str_list)
-            rule_str = rule_str.replace("...", inter_str)
+            rule_str = rule_str.replace("…", inter_str)
+        elif ("/" == rule_str) or ("计算过程" in rule_str) or re.search("^\s+$",rule_str):
+            rule_str = np.nan
+            
+        return rule_str
 
     def ind_exception_parser(self,
                              rule_str:str,
@@ -64,9 +68,10 @@ class SummaryVariables(object):
         """
 
         rule_str_group, rule_str_ind = rule_str.split("加总") # 
-        rule_str_group = re.sub("\u4e00-\u9fa5","",rule_str_group).split("=")
+        rule_str_group = re.sub("[\u4e00-\u9fa5]","",rule_str_group).split("=")
         group_str = f'{dataset_name}.groupby("{idx_col_name}")["{rule_str_group[1]}"].transform("sum")'
         rule_str_dict = {rule_str_group[0]:group_str}
+        rule_str_ind = rule_str_ind.replace("\n","").replace("ins=","ins_balance=")
         return [rule_str_ind, rule_str_dict]
 
     def extreme_exception_parse(self,
@@ -74,15 +79,23 @@ class SummaryVariables(object):
         """处理self.equ_table[self.equ_table["中间变量含义"] == "医疗保险报销"]"""
         rule_str_list = rule_str.split("\n")
         hh_str_list = rule_str_list[:2]
-        temp = rule_str_list.pop(hh_str_list[0])
+        temp = hh_str_list.pop(0)
         temp = temp.replace(" } ","}").replace(" ",",")
         hh_str_list.append(temp)
         ind_str = "".join(rule_str_list[2:])
         return hh_str_list, ind_str
     
+    def ins_exception_correct(self,
+                              wrong_str:str,
+                              correct_str:str,
+                              string:str):
+        return string.replace(wrong_str, correct_str)
+
+    
     def three_condition_parser(self,
-                            rule_str:str,):
+                            rule_str:str):
         """处理`分三种情况`"""
+        pass
 
     def if_lacking_parser(self,rule_str:str):
         """处理`若没有缺失值`"""
@@ -98,6 +111,7 @@ class SummaryVariables(object):
         return rule_str_list[::-1]
     
     def multi_equ_parser(self,rule_str:str):
+        """处理具有多个公式的情况"""
         rule_str_list = re.split("\n|[ ]+",rule_str)
         rule_str_list = [i for i in rule_str_list if (i != "") and (i is not None)]
         rule_str_list = rule_str_list[::-1]
@@ -109,7 +123,7 @@ class SummaryVariables(object):
                       idx_col_name:str="hhid"
                       ):
         data = data.dropna()
-        data = data.apply(self.uni_exception_parser)
+        data = data.apply(self.uni_exception_parser).dropna()
         ind_rule, hh_rule = [],[]
         hh_rule_list = []
         for rule_str in data:
@@ -125,9 +139,10 @@ class SummaryVariables(object):
                                                            idx_col_name=idx_col_name)
                 ind_rule.append(ind_str_result)
                 hh_rule_list.append(hh_str_list)
-            elif "分三种情况" in rule_str:
+            elif "分为三种情况" in rule_str:
+                self.three_condition_parser(rule_str)
                 pass
-            elif len(rule_str.split("=")) > 2:
+            elif len(rule_str.split("=")) > 2 and not re.search("[\u4e00-\u9fa5]",rule_str):
                 # 存在多个表达式
                 rule_str_list = self.multi_equ_parser(rule_str)
                 hh_rule_list.append(rule_str_list)
@@ -140,13 +155,13 @@ class SummaryVariables(object):
 
     def level_II_parse(self,data:pd.Series):
         data = data.dropna()
-        data = data.apply(self.uni_exception_parser)
+        data = data.apply(self.uni_exception_parser).dropna()
         hh_rule, hh_rule_list = [], []
         for rule_str in data:
-            if max in rule_str:
+            if "max" in rule_str:
                 rule_str_list = self.max_exception_parser(rule_str)
                 hh_rule_list.append(rule_str_list)
-            elif len(rule_str.split("")) > 2:
+            elif len(rule_str.split("=")) > 2:
                 rule_str_list = self.multi_equ_parser(rule_str)
                 hh_rule_list.append(rule_str_list)
             elif len(rule_str.split("=")) == 2:
@@ -183,28 +198,73 @@ class SummaryVariables(object):
         for rule in ind_rule:
             try:
                 rule_0 = re.sub("\s","",rule[0])
-                ind_data = ind_data.eval(rule_0)
-                new_cols.append(rule_0.split("=")[0])
-                ind_data[rule[1].keys[0]] = eval(rule[1].values[0])
-                new_cols.append(rule[1].keys[0])
+                ind_data,new_cols = self.recur_eval(data=ind_data,
+                                           rule_str=rule_0,
+                                           new_cols=new_cols,
+                                           col_name=None)
+                
+                col_name = list(rule[1].keys())[0]
+                rule_str = list(rule[1].values())[0]
+                ind_data,new_cols = self.recur_eval(data=ind_data,
+                                           rule_str=rule_str,
+                                           new_cols=new_cols,
+                                           col_name=col_name)
+                
             except Exception as e:
                 print(f"公式计算错误,错误原因:")
                 print(e)
                 print(f"错误公式:{rule}")
 
         return ind_data[new_cols]
+    
+    def recur_eval(self,
+                   data:pd.DataFrame, 
+                   rule_str:str,
+                   new_cols:list,
+                   col_name:str=None
+                   ):
+        """
+        迭代式地排除未定义的变量
+        """
+        rule_str = re.sub("\s","",rule_str)
+        turns = 0
+        while not re.search("=$",rule_str):
+            turns += 1
+            try:                
+                if not col_name:
+                    data = data.eval(rule_str)
+                    new_cols.append(rule_str.split("=")[0])
+                else:
+                    data[col_name] = eval(rule_str.replace("ind_data","data"))
+                    new_cols.append(col_name)
+                return data, new_cols
+            except pd.core.computation.ops.UndefinedVariableError as e:
+                undefined = re.search("[a-z]+[1-9]+[a-z]?(_imp)?",e.__str__()).group(0)
+                if f"={undefined}" in rule_str and not re.search(f"={undefined}$",rule_str):
+                    rule_str = rule_str.replace(f"{undefined}+","")
+                elif f"+{undefined}" in rule_str:
+                    rule_str = rule_str.replace(f"+{undefined}","")
+                elif re.search(f"={undefined}$",rule_str):
+                    break
+            except KeyError:
+                break
+            if turns > 20:
+                break
+
+        return data,new_cols
 
     def hh_data_cal(self,
-                               hh_data:pd.DataFrame,
-                               hh_rule_all:Union[list,tuple]):
+                    hh_data:pd.DataFrame,
+                    hh_rule_all:Union[list,tuple]):
         """用于计算level I中使用hh数据的中间变量"""
         new_cols = []
         hh_rule, hh_rule_list = hh_rule_all
         for rule_str in hh_rule:
             try:
-                rule_str = re.sub("\s","",rule_str)
-                hh_data = hh_data.eval(rule_str)
-                new_cols.append(rule_str)
+                hh_data,new_cols = self.recur_eval(data=hh_data,
+                                           rule_str=rule_str,
+                                           new_cols=new_cols,
+                                           col_name=None)
             except Exception as e:
                 print(f"公式计算错误,错误原因:")
                 print(e)
@@ -212,9 +272,10 @@ class SummaryVariables(object):
         for rule_str_list in hh_rule_list:
             try:
                 for rule_str in rule_str_list:
-                    rule_str = re.sub("\s","",rule_str)
-                    hh_data = hh_data.eval(rule_str)
-                    new_cols.append(rule_str)
+                    hh_data,new_cols = self.recur_eval(data=hh_data,
+                                            rule_str=rule_str,
+                                            new_cols=new_cols,
+                                            col_name=None)
             except Exception as e:
                 print(f"公式计算错误,错误原因:")
                 print(e)
@@ -266,7 +327,7 @@ class SummaryVariables(object):
 
 if __name__ == "__main__":
     summary = SummaryVariables()
-    hh_equ_group = summary.get_equ_group(entity="hh",entity_col="所在数据集")
-    ind_equ_group = summary.get_equ_group(entity="ind",entity_col="所在数据集")
+    # hh_equ_group = summary.get_equ_group(entity="hh",entity_col="所在数据集")
+    ind_equ_group = summary.variable_cal(year=2013)
     print("done.")
         
