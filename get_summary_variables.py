@@ -9,13 +9,14 @@ version:
 Author: huangzg
 LastEditors: huangzg
 Date: 2023-08-31 16:04:26
-LastEditTime: 2023-09-02 01:46:06
+LastEditTime: 2023-09-02 23:13:14
 '''
 import pandas as pd
 import numpy as np
 import regex as re
 from data_loader import DataLoader
 from typing import Union,List
+from copy import copy
 
 """用于计算2017年之前的综合变量"""
 
@@ -107,14 +108,27 @@ class SummaryVariables(object):
         rule_str_list = [i for i in rule_str_list if (i != "") and (i is not None)]
         for idx,string in enumerate(rule_str_list):
             if "max" in string:
-                rule_str_list[idx] = re.sub(" +", ",",string)
+                temp = re.sub(" +", ",",string).replace("=max{",",").replace("}","")
+                vari,temp_1,temp_2 = temp.split(",")
+                # 将c=max{a,b}, c= a*(a>b)+b*(a<b)
+                temp = f"{vari}={temp_1}*({temp_1}>={temp_2})+{temp_2}*({temp_1}<{temp_2})"
+                rule_str_list[idx] = temp
         return rule_str_list[::-1]
     
     def multi_equ_parser(self,rule_str:str):
         """处理具有多个公式的情况"""
         rule_str_list = re.split("\n|[ ]+",rule_str)
+        # 公式有可能截断
+        equ_true = [ True if re.search(r'^[-+*/]',string) else False for string in rule_str_list ]
+        for idx, symb in enumerate(equ_true):
+            if symb:
+                rule_str_list[idx-1] + rule_str_list[idx]
+                rule_str_list.pop(idx)
         rule_str_list = [i for i in rule_str_list if (i != "") and (i is not None)]
         rule_str_list = rule_str_list[::-1]
+        for idx,i in enumerate(rule_str_list):
+            if "tmp=" in i:
+                rule_str_list.insert(0,rule_str_list.pop(idx))
         return rule_str_list
 
     def level_I_parse(self,
@@ -180,32 +194,85 @@ class SummaryVariables(object):
         """
         将汇总表中的指定公式解析为一个公式列表
         """
+        print("开始提取公式...")
         level_1_equ = self.equ_table[inter_level_1_col]
         level_2_equ = self.equ_table[inter_level_2_col]
         ind_rule, I_hh_rule, I_hh_rule_list = self.level_I_parse(data=level_1_equ,
                                                              dataset_name=dataset_name,
                                                              idx_col_name=idx_col_name)
         II_hh_rule, II_hh_rule_list = self.level_II_parse(data=level_2_equ)
-        
+        print("提取公式完毕.")
         return ind_rule, I_hh_rule, I_hh_rule_list, II_hh_rule, II_hh_rule_list
+    
+    def recur_eval(self,
+                   data:pd.DataFrame, 
+                   rule_str:str,
+                   new_cols:list
+                   ):
+        """
+        迭代式地排除未定义的变量
+        """
+        rule_str_ori = copy(rule_str)
+        rule_str = re.sub("\s","",rule_str)
+        turns = 0
+        print("+"*80)
+        while not re.search("=$",rule_str):
+            turns += 1
+            try:                      
+                data = data.eval(rule_str)
+                new_cols.append(rule_str.split("=")[0])
+                return data, new_cols
+            except pd.core.computation.ops.UndefinedVariableError as e:
+                temp = e.__str__()
+                undefined = re.sub("'| |name|is not defined","",temp)
+                match_str = r"[-+*/]{}".format(undefined) # 匹配四则运算
+                if f"={undefined}" in rule_str and not re.search(f"={undefined}(.[0-9]{{1,3}})?$",rule_str):
+                    rule_str = re.sub(match_str,"",rule_str)
+                elif re.search(match_str,rule_str):
+                    rule_str = re.sub(match_str,"",rule_str)
+                elif re.search(f"(={undefined}(.[0-9]{{1,2}})?)$",rule_str):
+                    print("数据计算出错，错误原因:")
+                    print(e)
+                    print(f"错误公式：{rule_str}")
+                    break
+                if turns > 20:
+                    print(f"{turns}次数据计算出错，错误原因:")
+                    print(e)
+                    print(f"错误origin公式：{rule_str_ori}")
+                    print(f"错误的last公式:{rule_str}")
+                    break
+        
+        return data,new_cols
+    
+    def group_eval(self,
+                data:pd.DataFrame,
+                rule_str:str,
+                new_cols:list,
+                col_name:str):
+        print("*"*80)
+        rule_str = re.sub("\s","",rule_str)
+        data[col_name] = eval(rule_str.replace("ind_data","data"))
+        new_cols.append(col_name)
+        return data, new_cols
 
     def ind_data_cal(self,
                               ind_data:pd.DataFrame,
-                              ind_rule:list
+                              ind_rule:list,
+                              keep_cols:list = ["hhid","year","pline","hhead"]
                               )-> pd.DataFrame:
         """计算使用ind数据的中间变量"""
+        print("计算ind数据...")
         new_cols = []
         for rule in ind_rule:
             try:
                 rule_0 = re.sub("\s","",rule[0])
                 ind_data,new_cols = self.recur_eval(data=ind_data,
                                            rule_str=rule_0,
-                                           new_cols=new_cols,
-                                           col_name=None)
+                                           new_cols=new_cols)
                 
                 col_name = list(rule[1].keys())[0]
                 rule_str = list(rule[1].values())[0]
-                ind_data,new_cols = self.recur_eval(data=ind_data,
+                ind_data,new_cols = self.group_eval(data=ind_data,
                                            rule_str=rule_str,
                                            new_cols=new_cols,
                                            col_name=col_name)
@@ -214,57 +281,25 @@ class SummaryVariables(object):
                 print(f"公式计算错误,错误原因:")
                 print(e)
                 print(f"错误公式:{rule}")
-
+        for i in keep_cols:
+            if i in ind_data.columns:
+                new_cols.append(i)
+        print("计算ind数据完毕.")
         return ind_data[new_cols]
     
-    def recur_eval(self,
-                   data:pd.DataFrame, 
-                   rule_str:str,
-                   new_cols:list,
-                   col_name:str=None
-                   ):
-        """
-        迭代式地排除未定义的变量
-        """
-        rule_str = re.sub("\s","",rule_str)
-        turns = 0
-        while not re.search("=$",rule_str):
-            turns += 1
-            try:                
-                if not col_name:
-                    data = data.eval(rule_str)
-                    new_cols.append(rule_str.split("=")[0])
-                else:
-                    data[col_name] = eval(rule_str.replace("ind_data","data"))
-                    new_cols.append(col_name)
-                return data, new_cols
-            except pd.core.computation.ops.UndefinedVariableError as e:
-                undefined = re.search("[a-z]+[1-9]+[a-z]?(_imp)?",e.__str__()).group(0)
-                if f"={undefined}" in rule_str and not re.search(f"={undefined}$",rule_str):
-                    rule_str = rule_str.replace(f"{undefined}+","")
-                elif f"+{undefined}" in rule_str:
-                    rule_str = rule_str.replace(f"+{undefined}","")
-                elif re.search(f"={undefined}$",rule_str):
-                    break
-            except KeyError:
-                break
-            if turns > 20:
-                break
-
-        return data,new_cols
-
     def hh_data_cal(self,
                     hh_data:pd.DataFrame,
-                    hh_rule_all:Union[list,tuple]):
+                    hh_rule_all:Union[list,tuple],
+                    keep_cols:list=["hhid","year"]):
         """用于计算level I中使用hh数据的中间变量"""
+        print("计算hh数据开始...")
         new_cols = []
         hh_rule, hh_rule_list = hh_rule_all
         for rule_str in hh_rule:
             try:
                 hh_data,new_cols = self.recur_eval(data=hh_data,
                                            rule_str=rule_str,
-                                           new_cols=new_cols,
-                                           col_name=None)
+                                           new_cols=new_cols)
             except Exception as e:
                 print(f"公式计算错误,错误原因:")
                 print(e)
@@ -274,16 +309,25 @@ class SummaryVariables(object):
                 for rule_str in rule_str_list:
                     hh_data,new_cols = self.recur_eval(data=hh_data,
                                             rule_str=rule_str,
-                                            new_cols=new_cols,
-                                            col_name=None)
+                                            new_cols=new_cols)
             except Exception as e:
                 print(f"公式计算错误,错误原因:")
                 print(e)
                 print(f"错误公式:{rule_str_list}")
-
+        for i in keep_cols:
+            if i in hh_data.columns:
+                new_cols.append(i)
+        print("计算hh数据完毕.")
         return hh_data[new_cols]
-        
 
+    def data_convert(self,data:pd.Series) -> pd.Series:
+        data = data.fillna(0)
+        try:
+            data = data.astype(float)
+        except Exception as e:
+            print(e)
+            print(data[:10])
+        return data
     def variable_cal(self,
                      year:int=2015,
                     inter_level_1_col:str="中间变量计算公式",
@@ -291,7 +335,7 @@ class SummaryVariables(object):
                     idx_col_name:str="hhid"
                      ):
         """计算最终数据"""
-
+        print(f"开始提取{year}年数据...")
         hh_data = self.data_loader.year_entity_loader(year=year,
                                                    entity="hh",
                                                    data_dir=self.data_dir,
@@ -304,6 +348,9 @@ class SummaryVariables(object):
                                                        entity="master",
                                                        data_dir=self.data_dir,
                                                        drop_dup=False)
+        hh_data = hh_data.apply(self.data_convert)
+        ind_data = ind_data.apply(self.data_convert)
+        master_data = master_data.apply(self.data_convert)
         ind_rule, I_hh_rule, I_hh_rule_list, II_hh_rule, II_hh_rule_list = self.equ_parser(
             inter_level_1_col=inter_level_1_col,
             inter_level_2_col=inter_level_2_col,
@@ -315,7 +362,7 @@ class SummaryVariables(object):
         hh_data_I = self.hh_data_cal(hh_data=hh_data_merge,hh_rule_all=(I_hh_rule,I_hh_rule_list))
         hh_data_II = self.hh_data_cal(hh_data=hh_data_I,hh_rule_all=(II_hh_rule,II_hh_rule_list))
         final_data = pd.merge(hh_data_II, master_data,how="left",on=idx_col_name)
-        
+        print(f"提取{year}年数据完毕")
         return final_data
 
     def multi_year_call(self,years:List[int] = [2013,2015]):
@@ -327,7 +374,8 @@ class SummaryVariables(object):
 
 if __name__ == "__main__":
     summary = SummaryVariables()
-    # hh_equ_group = summary.get_equ_group(entity="hh",entity_col="所在数据集")
-    ind_equ_group = summary.variable_cal(year=2013)
+    year = 2015
+    result = summary.variable_cal(year=2015)
+    result.to_csv("_data.csv",index=False)
     print("done.")
         
