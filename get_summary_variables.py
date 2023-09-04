@@ -9,7 +9,7 @@ version:
 Author: huangzg
 LastEditors: huangzg
 Date: 2023-08-31 16:04:26
-LastEditTime: 2023-09-02 23:13:14
+LastEditTime: 2023-09-04 10:09:00
 '''
 import pandas as pd
 import numpy as np
@@ -227,15 +227,16 @@ class SummaryVariables(object):
                 undefined = re.sub("'| |name|is not defined","",temp)
                 match_str = r"[-+*/]{}".format(undefined) # 匹配四则运算
                 if f"={undefined}" in rule_str and not re.search(f"={undefined}(.[0-9]{{1,3}})?$",rule_str):
+                    match_str = r"{}[-+*/]".format(undefined)
                     rule_str = re.sub(match_str,"",rule_str)
                 elif re.search(match_str,rule_str):
                     rule_str = re.sub(match_str,"",rule_str)
-                elif re.search(f"(={undefined}(.[0-9]{{1,2}})?)$",rule_str):
+                elif re.search(f"(={undefined}(.[0-9]{{1,3}})?)$",rule_str):
                     print("数据计算出错，错误原因:")
                     print(e)
                     print(f"错误公式：{rule_str}")
                     break
-                if turns > 20:
+                if turns > 15:
                     print(f"{turns}次数据计算出错，错误原因:")
                     print(e)
                     print(f"错误origin公式：{rule_str_ori}")
@@ -326,7 +327,6 @@ class SummaryVariables(object):
             data = data.astype(float)
         except Exception as e:
             print(e)
-            print(data[:10])
         return data
     def variable_cal(self,
                      year:int=2015,
@@ -376,6 +376,7 @@ if __name__ == "__main__":
     summary = SummaryVariables()
     year = 2015
     result = summary.variable_cal(year=2015)
+    print(result.shape)
     result.to_csv("_data.csv",index=False)
     print("done.")
         
